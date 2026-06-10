@@ -1,0 +1,8 @@
+import {
+  "conglinyizhi/coding_agent_other/lib/config",
+  "conglinyizhi/coding_agent_other/lib/model",
+  "conglinyizhi/coding_agent_other/lib/native",
+  "moonbitlang/core/env",
+  "moonbitlang/core/debug",
+  "moonbitlang/core/json",
+}

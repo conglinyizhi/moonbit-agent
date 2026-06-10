@@ -1,0 +1,24 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "conglinyizhi/coding_agent_other/lib/tools"
+
+import {
+  "conglinyizhi/coding_agent_other/lib/config",
+  "conglinyizhi/coding_agent_other/lib/model",
+}
+
+// Values
+pub fn call_tool(@config.ToolsConfig, String, String, String) -> @model.ToolResult raise ToolError
+
+pub fn fetch_tool_definitions(@config.ToolsConfig, String) -> Array[@model.ToolDef] raise ToolError
+
+// Errors
+pub suberror ToolError {
+  Failure(message~ : String)
+}
+
+// Types and methods
+
+// Type aliases
+
+// Traits
+
