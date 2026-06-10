@@ -1,0 +1,57 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "conglinyizhi/coding_agent_other/lib/config"
+
+// Values
+pub fn default_config() -> AppConfig
+
+pub fn load_config(String) -> AppConfig raise ConfigError
+
+pub fn save_config(String, AppConfig) -> Unit raise ConfigError
+
+// Errors
+pub suberror ConfigError {
+  Io(message~ : String)
+  Parse(message~ : String)
+  Missing(message~ : String)
+}
+
+// Types and methods
+pub struct AgentConfig {
+  mut system_prompt : String
+  mut max_turns : Int
+  mut max_tool_calls_per_turn : Int
+  mut workdir : String
+}
+
+pub struct AppConfig {
+  model : ModelConfig
+  agent : AgentConfig
+  tools : ToolsConfig
+  ui : UiConfig
+}
+
+pub struct ModelConfig {
+  mut base_url : String
+  mut model : String
+  mut api_key : String
+  mut temperature : Double
+  mut max_tokens : Int
+}
+
+pub struct ToolsConfig {
+  mut better_edit_tools_cmd : String
+  mut better_edit_tools_args : Array[String]
+  mut startup_timeout_ms : Int
+  mut call_timeout_ms : Int
+}
+
+pub struct UiConfig {
+  mut show_timestamps : Bool
+  mut show_tool_calls : Bool
+  mut show_raw_tool_results : Bool
+}
+
+// Type aliases
+
+// Traits
+

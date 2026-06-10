@@ -1,0 +1,57 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "conglinyizhi/coding_agent_other/lib/model"
+
+// Values
+pub fn assistant_message(String) -> Message
+
+pub fn message_to_json(Message) -> Json
+
+pub fn system_message(String) -> Message
+
+pub fn tool_defs_to_json(Array[ToolDef]) -> Json
+
+pub fn tool_message(String, String, String, Bool) -> Message
+
+pub fn user_message(String) -> Message
+
+// Errors
+
+// Types and methods
+pub enum Message {
+  System(String)
+  User(String)
+  Assistant(String)
+  Tool(call_id~ : String, name~ : String, content~ : String, is_error~ : Bool)
+}
+
+pub struct ModelReply {
+  content : String
+  tool_calls : Array[ToolCall]
+}
+pub fn ModelReply::make(String, Array[ToolCall]) -> Self
+
+pub struct ToolCall {
+  id : String
+  name : String
+  arguments_json : String
+}
+pub fn ToolCall::make(String, String, String) -> Self
+
+pub struct ToolDef {
+  name : String
+  description : String
+  input_schema : Json
+}
+pub fn ToolDef::make(String, String, Json) -> Self
+
+pub struct ToolResult {
+  tool_call_id : String
+  content_text : String
+  is_error : Bool
+}
+pub fn ToolResult::make(String, String, Bool) -> Self
+
+// Type aliases
+
+// Traits
+

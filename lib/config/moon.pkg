@@ -1,0 +1,6 @@
+import {
+  "conglinyizhi/coding_agent_other/lib/native",
+  "moonbitlang/core/debug",
+  "moonbitlang/core/env",
+  "moonbitlang/core/strconv",
+}

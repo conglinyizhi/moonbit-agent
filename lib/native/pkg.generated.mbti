@@ -1,0 +1,21 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "conglinyizhi/coding_agent_other/lib/native"
+
+// Values
+pub fn read_file(String) -> String raise NativeError
+
+pub fn read_stdin_line() -> String?
+
+pub fn run_command(String, stdin_data? : String) -> String raise NativeError
+
+pub fn write_file(String, String) -> Unit raise NativeError
+
+// Errors
+type NativeError
+
+// Types and methods
+
+// Type aliases
+
+// Traits
+
