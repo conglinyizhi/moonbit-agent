@@ -1,0 +1,7 @@
+import {
+  "conglinyizhi/coding_agent_other/lib/agent" @agentlib,
+}
+
+options(
+  "is-main": true,
+)
