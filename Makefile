@@ -5,7 +5,7 @@ SHELL := /usr/bin/env bash
 ROOT := $(abspath .)
 MOON := moon
 TARGET := native
-CONFIG ?= agent.example.toml
+CONFIG ?= agent.toml
 
 AGENT_EXE := ./_build/$(TARGET)/debug/build/cmd/agent/agent.exe
 BETOOLS_EXE := ./_build/$(TARGET)/debug/build/cmd/better-edit-tools/better-edit-tools.exe
