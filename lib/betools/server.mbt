@@ -10,6 +10,16 @@ priv struct SnapshotPushResult {
   warning : String
 }
 
+priv struct SnapshotRecord {
+  id : String
+  tool : String
+  file : String
+  before_content : String
+  after_content : String
+  summary : String
+  created_at : String
+}
+
 ///|
 fn obj(entries : Array[(String, Json)]) -> Json {
   Json::object(Map(entries))
@@ -33,6 +43,11 @@ fn num(value : Int) -> Json {
 ///|
 fn bool_json(value : Bool) -> Json {
   Json::boolean(value)
+}
+
+///|
+fn shell_quote(input : String) -> String {
+  "'\{input.replace(old="'", new="'\"'\"'")}'"
 }
 
 ///|
@@ -634,12 +649,137 @@ fn view_path(view_id : String) -> String {
 }
 
 ///|
+fn trx_index_path() -> String {
+  ".moonagent-trx-index.json"
+}
+
+///|
+fn trx_snapshot_path(id : String) -> String {
+  ".moonagent-trx-\{id}.json"
+}
+
+///|
 fn stable_id(seed : String) -> String {
   let mut checksum = 17
   for ch in seed {
     checksum = checksum * 31 + ch.to_int()
   }
   "\{@env.now()}-\{checksum.abs()}-\{seed.length()}"
+}
+
+///|
+fn delete_path(path : String) -> Unit {
+  let cwd = @env.current_dir().unwrap_or(".")
+  let command = "cd \{shell_quote(cwd)} && rm -f \{shell_quote(path)}"
+  ignore(@native.run_command(command) catch { _ => "" })
+}
+
+///|
+fn snapshot_to_json(snapshot : SnapshotRecord) -> Json {
+  obj([
+    ("id", str(snapshot.id)),
+    ("tool", str(snapshot.tool)),
+    ("file", str(snapshot.file)),
+    ("before_content", str(snapshot.before_content)),
+    ("after_content", str(snapshot.after_content)),
+    ("summary", str(snapshot.summary)),
+    ("created_at", str(snapshot.created_at)),
+  ])
+}
+
+///|
+fn parse_snapshot_json(value : Json) -> SnapshotRecord? {
+  match value {
+    Object(root) => {
+      let id_opt = get_string(root, "id")
+      let tool_opt = get_string(root, "tool")
+      let file_opt = get_string(root, "file")
+      let before_opt = get_string(root, "before_content")
+      let after_opt = get_string(root, "after_content")
+      let summary_opt = get_string(root, "summary")
+      let created_at_opt = get_string(root, "created_at")
+      if id_opt is None ||
+        tool_opt is None ||
+        file_opt is None ||
+        before_opt is None ||
+        after_opt is None ||
+        summary_opt is None ||
+        created_at_opt is None {
+        None
+      } else {
+        Some({
+          id: id_opt.unwrap(),
+          tool: tool_opt.unwrap(),
+          file: file_opt.unwrap(),
+          before_content: before_opt.unwrap(),
+          after_content: after_opt.unwrap(),
+          summary: summary_opt.unwrap(),
+          created_at: created_at_opt.unwrap(),
+        })
+      }
+    }
+    _ => None
+  }
+}
+
+///|
+fn load_snapshot_ids() -> Array[String] {
+  let raw = @native.read_file(trx_index_path()) catch { _ => return [] }
+  let parsed = @json.parse(raw) catch { _ => return [] }
+  match parsed {
+    Array(items) => {
+      let ids : Array[String] = []
+      for item in items {
+        match item {
+          String(id) => ids.push(id)
+          _ => ()
+        }
+      }
+      ids
+    }
+    _ => []
+  }
+}
+
+///|
+fn save_snapshot_ids(ids : Array[String]) -> Unit {
+  let rendered = arr(ids.map(id => str(id))).stringify()
+  @native.write_file(trx_index_path(), rendered) catch { _ => () }
+}
+
+///|
+fn load_snapshot(id : String) -> SnapshotRecord? {
+  let raw = @native.read_file(trx_snapshot_path(id)) catch { _ => return None }
+  let parsed = @json.parse(raw) catch { _ => return None }
+  parse_snapshot_json(parsed)
+}
+
+///|
+fn save_snapshot(snapshot : SnapshotRecord) -> Bool {
+  @native.write_file(
+    trx_snapshot_path(snapshot.id),
+    snapshot_to_json(snapshot).stringify(),
+  ) catch {
+    _ => return false
+  }
+  true
+}
+
+///|
+fn delete_snapshot(id : String) -> Unit {
+  delete_path(trx_snapshot_path(id))
+}
+
+///|
+fn collect_snapshots() -> Array[SnapshotRecord] {
+  let snapshots : Array[SnapshotRecord] = []
+  for id in load_snapshot_ids() {
+    match load_snapshot(id) {
+      Some(snapshot) => snapshots.push(snapshot)
+      None => ()
+    }
+  }
+  snapshots
 }
 
 ///|
@@ -650,23 +790,83 @@ fn push_snapshot(
   after_content : String,
   summary : String,
 ) -> SnapshotPushResult {
-  {
-    id: stable_id(
-      "\{tool}|\{file}|\{summary}|\{before_content.length()}|\{after_content.length()}",
-    ),
-    warning: "snapshot persistence is temporarily disabled in the native runtime; edit succeeded but rollback data was not recorded.",
+  let id = stable_id(
+    "\{tool}|\{file}|\{summary}|\{before_content.length()}|\{after_content.length()}",
+  )
+  let snapshot : SnapshotRecord = {
+    id: id,
+    tool: tool,
+    file: file,
+    before_content: before_content,
+    after_content: after_content,
+    summary: summary,
+    created_at: "\{@env.now()}",
   }
+  if !save_snapshot(snapshot) {
+    return { id: id, warning: "failed to persist snapshot" }
+  }
+  let ids = load_snapshot_ids()
+  ids.push(id)
+  let mut warning = ""
+  while ids.length() > MAX_SNAPSHOTS {
+    let dropped = ids.remove(0)
+    delete_snapshot(dropped)
+    warning = "snapshot queue full; evicted oldest snapshot"
+  }
+  save_snapshot_ids(ids)
+  { id: id, warning: warning }
 }
 
 ///|
 fn commit_snapshots() -> Int {
-  0
+  let ids = load_snapshot_ids()
+  for id in ids {
+    delete_snapshot(id)
+  }
+  delete_path(trx_index_path())
+  ids.length()
 }
 
 ///|
 fn rollback_snapshots(step : Int) -> (Int, Array[String]) {
-  ignore(step)
-  (0, ["snapshot rollback is temporarily disabled in the native runtime"])
+  if step <= 0 {
+    return (0, ["step must be positive"])
+  }
+  let ids = load_snapshot_ids()
+  if ids.is_empty() {
+    return (0, [])
+  }
+  let requested = if step > ids.length() { ids.length() } else { step }
+  let errors : Array[String] = []
+  let kept : Array[String] = []
+  for i in 0..<(ids.length() - requested) {
+    kept.push(ids[i])
+  }
+  let mut rolled_back = 0
+  let mut idx = ids.length()
+  while idx > ids.length() - requested {
+    idx -= 1
+    let id = ids[idx]
+    match load_snapshot(id) {
+      Some(snapshot) => {
+        @native.write_file(snapshot.file, snapshot.before_content) catch {
+          _ => {
+            errors.push("failed to restore \{snapshot.file}")
+            kept.push(id)
+            continue
+          }
+        }
+        rolled_back += 1
+        delete_snapshot(id)
+      }
+      None => errors.push("missing snapshot \{id}")
+    }
+  }
+  save_snapshot_ids(kept)
+  if kept.is_empty() {
+    delete_path(trx_index_path())
+  }
+  (rolled_back, errors)
 }
 
 ///|
@@ -1430,13 +1630,34 @@ fn tool_trx_rollback(arguments : Map[String, Json]) -> Json {
 
 ///|
 fn tool_trx_status(_arguments : Map[String, Json]) -> Json {
+  let snapshots = collect_snapshots()
+  let snapshot_items : Array[Json] = []
+  let mut mem_bytes = 0
+  for snapshot in snapshots {
+    mem_bytes +=
+      snapshot.before_content.length() + snapshot.after_content.length() +
+      snapshot.summary.length()
+    snapshot_items.push(
+      obj([
+        ("id", str(snapshot.id)),
+        ("tool", str(snapshot.tool)),
+        ("file", str(snapshot.file)),
+        ("summary", str(snapshot.summary)),
+        ("created_at", str(snapshot.created_at)),
+      ]),
+    )
+  }
   let payload = obj([
     ("ok", bool_json(true)),
     (
       "queue",
-      obj([("used", num(0)), ("max", num(MAX_SNAPSHOTS)), ("mem_bytes", num(0))]),
+      obj([
+        ("used", num(snapshots.length())),
+        ("max", num(MAX_SNAPSHOTS)),
+        ("mem_bytes", num(mem_bytes)),
+      ]),
     ),
-    ("snapshots", arr([])),
+    ("snapshots", arr(snapshot_items)),
   ])
   json_text_result_data(payload.stringify(), false, payload)
 }
