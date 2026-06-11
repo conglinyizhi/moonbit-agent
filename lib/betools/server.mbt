@@ -83,20 +83,6 @@ fn handle_cli() -> Bool {
 }
 
 ///|
-fn json_error(code : Int, message : String, id? : Json = Json::null()) -> Json {
-  obj([
-    ("jsonrpc", str("2.0")),
-    ("id", id),
-    ("error", obj([("code", num(code)), ("message", str(message))])),
-  ])
-}
-
-///|
-fn json_ok(id : Json, result : Json) -> Json {
-  obj([("jsonrpc", str("2.0")), ("id", id), ("result", result)])
-}
-
-///|
 fn json_text_result(text : String, is_error : Bool) -> Json {
   let content = arr([obj([("type", str("text")), ("text", str(text))])])
   let items : Array[(String, Json)] = [("content", content)]
@@ -420,30 +406,6 @@ fn schema_trx_status() -> Json {
     ("name", str("be-trx-status")),
     ("description", str("Show pending edit snapshots and queue usage.")),
     ("inputSchema", obj([("type", str("object")), ("properties", obj([]))])),
-  ])
-}
-
-///|
-fn list_tools_result() -> Json {
-  obj([
-    (
-      "tools",
-      arr([
-        schema_read(),
-        schema_write(),
-        schema_replace(),
-        schema_insert(),
-        schema_delete(),
-        schema_batch(),
-        schema_func_range(),
-        schema_balance(),
-        schema_tag_range(),
-        schema_insert_chip(),
-        schema_trx_commit(),
-        schema_trx_rollback(),
-        schema_trx_status(),
-      ]),
-    ),
   ])
 }
 
@@ -1954,88 +1916,120 @@ fn tool_call(name : String, arguments : Map[String, Json]) -> Json {
 }
 
 ///|
-fn extract_arguments(params : Map[String, Json]) -> Map[String, Json] {
-  match params.get("arguments") {
-    Some(Object(obj_value)) => obj_value
-    _ =>
-      match params.get("args") {
-        Some(Object(obj_value)) => obj_value
-        _ => Map::default()
-      }
+fn register_tool_handler(
+  server : @mcp.MCPServer,
+  schema : Json,
+) -> Unit {
+  let (name, description, input_schema) = match schema {
+    Object(root) => (
+      get_string(root, "name").unwrap_or(""),
+      get_string(root, "description").unwrap_or(""),
+      root.get("inputSchema").unwrap_or(obj([])),
+    )
+    _ => ("", "", obj([]))
   }
-}
-
-///|
-fn handle_request(line : String) -> Json? {
-  let req = @json.parse(line) catch {
-    _ => return Some(json_error(-32700, "invalid JSON"))
-  }
-  match req {
-    Object(root) => {
-      let id = root.get("id").unwrap_or(Json::null())
-      let method_opt = get_string(root, "method")
-      if method_opt is None {
-        return Some(json_error(-32600, "missing method", id~))
+  server.register_tool(
+    name,
+    description,
+    input_schema,
+    fn(args : Json) -> Result[@mcp.ToolResult, @mcp_types.MCPError] {
+      let result = match args {
+        Object(map) => tool_call(name, map)
+        _ => json_text_result("arguments must be an object", true)
       }
-      let method_name = method_opt.unwrap()
-      match method_name {
-        "initialize" =>
-          Some(
-            json_ok(
-              id,
-              obj([
-                ("protocolVersion", str("2024-11-05")),
-                (
-                  "serverInfo",
-                  obj([
-                    ("name", str("better-edit-tools")),
-                    ("version", str(VERSION)),
-                  ]),
-                ),
-                (
-                  "capabilities",
-                  obj([("tools", obj([("listChanged", bool_json(false))]))]),
-                ),
-              ]),
-            ),
-          )
-        "notifications/initialized" => None
-        "tools/list" => Some(json_ok(id, list_tools_result()))
-        "tools/call" =>
-          match root.get("params") {
-            Some(Object(params)) =>
-              match get_string(params, "name") {
-                Some(name) =>
-                  Some(json_ok(id, tool_call(name, extract_arguments(params))))
-                None => Some(json_error(-32602, "missing tool name", id~))
+      let text = match result {
+        Object(root) =>
+          match root.get("content") {
+            Some(Array(items)) if items.length() > 0 =>
+              match items[0] {
+                Object(item) =>
+                  match item.get("text") {
+                    Some(String(s)) => s
+                    _ => result.stringify()
+                  }
+                _ => result.stringify()
               }
-            _ => Some(json_error(-32602, "missing params object", id~))
+            _ => result.stringify()
           }
-        _ => Some(json_error(-32601, "method not found", id~))
+        _ => result.stringify()
       }
-    }
-    _ => Some(json_error(-32600, "request must be an object"))
+      let is_error = match result {
+        Object(root) =>
+          match root.get("isError") {
+            Some(True) => true
+            _ => false
+          }
+        _ => false
+      }
+      Ok(
+        if is_error {
+          @mcp.ToolResult::error(text)
+        } else {
+          @mcp.ToolResult::text(text)
+        },
+      )
+    },
+  )
+}
+
+///|
+fn is_initialized_notification(line : String) -> Bool {
+  let parsed = @json.parse(line) catch { _ => return false }
+  match parsed {
+    Object(root) =>
+      match root.get("method") {
+        Some(String(method_name)) => {
+          method_name == "notifications/initialized" &&
+          root.get("id") is None
+        }
+        _ => false
+      }
+    _ => false
   }
 }
 
 ///|
-pub fn run_main() -> Unit {
-  if !handle_cli() {
-    return
-  }
+async fn run_stdio_compat(server : @mcp.MCPServer) -> Unit {
+  let writer = @io.BufferedWriter::new(@stdio.stdout, size=8192)
   for ;; {
     match @native.read_stdin_line() {
       Some(line) => {
         let trimmed = line.trim().to_owned()
-        if trimmed == "" {
+        if trimmed == "" || is_initialized_notification(trimmed) {
           continue
         }
-        match handle_request(trimmed) {
-          Some(response) => println(response.stringify())
-          None => ()
-        }
+        let response = server.handle_request(trimmed)
+        writer.write(response)
+        writer.write("\n")
+        writer.flush()
       }
       None => break
     }
   }
+}
+
+///|
+pub async fn run_main() -> Unit {
+  if !handle_cli() {
+    return
+  }
+  let server = @mcp.mcp_server(name="better-edit-tools", version=VERSION)
+  for schema in [
+    schema_read(),
+    schema_write(),
+    schema_replace(),
+    schema_insert(),
+    schema_delete(),
+    schema_func_range(),
+    schema_balance(),
+    schema_tag_range(),
+    schema_insert_chip(),
+    schema_batch(),
+    schema_trx_commit(),
+    schema_trx_rollback(),
+    schema_trx_status(),
+  ] {
+    register_tool_handler(server, schema)
+  }
+  run_stdio_compat(server)
 }

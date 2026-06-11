@@ -1,4 +1,4 @@
 ///|
-fn main {
+async fn main {
   @betools.run_main()
 }

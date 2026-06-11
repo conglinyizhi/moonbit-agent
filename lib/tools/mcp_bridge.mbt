@@ -4,11 +4,6 @@ pub suberror ToolError {
 }
 
 ///|
-fn shell_quote(input : String) -> String {
-  "'\{input.replace(old="'", new="'\"'\"'")}'"
-}
-
-///|
 fn resolve_command_path(command : String) -> String {
   if command == "" || command.has_prefix("/") {
     command
@@ -24,177 +19,228 @@ fn resolve_command_path(command : String) -> String {
 }
 
 ///|
+fn resolve_workdir(workdir : String) -> String {
+  if workdir == "" || workdir == "." {
+    @env.current_dir().unwrap_or(".")
+  } else if workdir.has_prefix("/") {
+    workdir
+  } else {
+    let cwd = @env.current_dir().unwrap_or(".")
+    "\{cwd}/\{workdir}"
+  }
+}
+
+///|
+fn shell_quote(input : String) -> String {
+  "'\{input.replace(old="'", new="'\"'\"'")}'"
+}
+
+///|
 fn command_string(cfg : @config.ToolsConfig, workdir : String) -> String {
-  let args_joined = cfg.better_edit_tools_args.join(" ")
   let command_path = resolve_command_path(cfg.better_edit_tools_cmd)
-  let tool_command = if args_joined == "" {
+  let args = cfg.better_edit_tools_args.map(shell_quote).join(" ")
+  let tool_command = if args == "" {
     shell_quote(command_path)
   } else {
-    "\{shell_quote(command_path)} \{args_joined}"
+    "\{shell_quote(command_path)} \{args}"
   }
-  if workdir == "" || workdir == "." {
-    tool_command
-  } else {
-    "cd \{shell_quote(workdir)} && \{tool_command}"
+  let resolved_workdir = resolve_workdir(workdir)
+  "cd \{shell_quote(resolved_workdir)} && \{tool_command}"
+}
+
+///|
+fn response_lines(output : String) -> Array[String] {
+  output
+    .split("\n")
+    .filter(line => line != "" && line.has_prefix("{"))
+    .map(line => line.to_owned())
+    .to_array()
+}
+
+fn jsonrpc_result_or_error(
+  response_str : String,
+) -> Result[Json, ToolError] {
+  let json = @json.parse(response_str) catch {
+    _ => return Err(ToolError::Failure(message="invalid JSON response"))
+  }
+  match json {
+    Object(obj) => {
+      match obj.get("error") {
+        Some(Object(err_obj)) => {
+          let message = match err_obj.get("message") {
+            Some(String(m)) => m
+            _ => "unknown server error"
+          }
+          Err(ToolError::Failure(message="server error: \{message}"))
+        }
+        _ =>
+          match obj.get("result") {
+            Some(result_json) => Ok(result_json)
+            None =>
+              Err(
+                ToolError::Failure(message="response missing 'result' field"),
+              )
+          }
+      }
+    }
+    _ => Err(ToolError::Failure(message="response must be a JSON object"))
   }
 }
 
 ///|
-fn run_mcp(
-  cfg : @config.ToolsConfig,
-  workdir : String,
-  input : String,
-) -> String raise ToolError {
-  @native.run_command(command_string(cfg, workdir), stdin_data=input) catch {
-    _ => raise ToolError::Failure(message="failed to execute better-edit-tools")
+fn parse_tool_definitions_result(
+  result_json : Json,
+) -> Result[Array[@model.ToolDef], ToolError] {
+  match result_json {
+    Object(obj) =>
+      match obj.get("tools") {
+        Some(Array(items)) => {
+          let defs : Array[@model.ToolDef] = []
+          for item in items {
+            match item {
+              Object(tool_obj) => {
+                let name = match tool_obj.get("name") {
+                  Some(String(value)) => value
+                  _ => continue
+                }
+                let description = match tool_obj.get("description") {
+                  Some(String(value)) => value
+                  _ => ""
+                }
+                let input_schema = tool_obj.get("inputSchema").unwrap_or(
+                  Json::null(),
+                )
+                defs.push(@model.ToolDef::make(name, description, input_schema))
+              }
+              _ => ()
+            }
+          }
+          Ok(defs)
+        }
+        _ => Err(ToolError::Failure(message="tools/list missing tools array"))
+      }
+    _ => Err(ToolError::Failure(message="tools/list result must be an object"))
   }
 }
 
 ///|
-fn get_field(obj : Map[String, Json], key : String) -> Json raise ToolError {
-  match obj.get(key) {
-    Some(value) => value
-    None => raise ToolError::Failure(message="missing field: \{key}")
-  }
-}
-
-///|
-fn get_string(obj : Map[String, Json], key : String) -> String? {
-  match obj.get(key) {
-    Some(String(value)) => Some(value)
+fn render_content_item(item : Json) -> String? {
+  match item {
+    Object(obj) =>
+      match obj.get("type") {
+        Some(String("text")) =>
+          match obj.get("text") {
+            Some(String(text)) => Some(text)
+            _ => None
+          }
+        Some(String("image")) =>
+          match obj.get("mimeType") {
+            Some(String(mime_type)) => Some("[image:\{mime_type}]")
+            _ => Some("[image:image/png]")
+          }
+        Some(String("resource_link")) =>
+          match obj.get("uri") {
+            Some(String(uri)) => Some(uri)
+            _ => None
+          }
+        Some(String("resource")) => {
+          let uri = match obj.get("uri") {
+            Some(String(value)) => value
+            _ => ""
+          }
+          match obj.get("text") {
+            Some(String(text)) => Some("resource:\{uri}\n\{text}")
+            _ =>
+              match obj.get("blob") {
+                Some(String(_)) =>
+                  match obj.get("mimeType") {
+                    Some(String(mime_type)) =>
+                      Some("resource:\{uri} [blob:\{mime_type}]")
+                    _ => Some("resource:\{uri} [blob:application/octet-stream]")
+                  }
+                _ => None
+              }
+          }
+        }
+        _ => None
+      }
     _ => None
   }
 }
 
 ///|
-fn render_tool_content(item : Map[String, Json]) -> String {
-  let text = match item.get("text") {
-    Some(String(s)) => s
-    _ => ""
-  }
-  match item.get("_data") {
-    Some(data) => {
-      let data_text = data.stringify()
-      if text == "" {
-        data_text
-      } else if text == data_text {
-        text
-      } else {
-        "\{text}\n\nmetadata:\n\{data_text}"
+fn parse_tool_call_result(
+  result_json : Json,
+) -> Result[@model.ToolResult, ToolError] {
+  match result_json {
+    Object(obj) => {
+      let text = match obj.get("content") {
+        Some(Array(items)) => items.filter_map(render_content_item).join("\n\n")
+        _ => ""
       }
+      let is_error = match obj.get("isError") {
+        Some(True) => true
+        _ => false
+      }
+      Ok(@model.ToolResult::make("tool-call", text, is_error))
     }
-    None => text
+    _ => Err(ToolError::Failure(message="tools/call result must be an object"))
   }
 }
 
 ///|
-fn parse_tool_result(raw : String) -> @model.ToolResult raise ToolError {
-  let lines = raw
-    .split("\n")
-    .filter(line => line != "" && line.has_prefix("{"))
-    .map(line => line.to_owned())
-    .to_array()
-  if lines.is_empty() {
-    raise ToolError::Failure(message="empty tool response")
-  }
-  let payload = @json.parse(lines[lines.length() - 1]) catch {
-    _ => raise ToolError::Failure(message="invalid tool response JSON")
-  }
-  match payload {
-    Object(root) =>
-      match get_field(root, "result") {
-        Object(result) => {
-          let text = match result.get("content") {
-            Some(Array(items)) if items.length() > 0 =>
-              match items[0] {
-                Object(item) => render_tool_content(item)
-                _ => ""
-              }
-            _ => ""
-          }
-          let is_error = match result.get("isError") {
-            Some(True) => true
-            _ => false
-          }
-          @model.ToolResult::make("tool-call", text, is_error)
-        }
-        _ =>
-          raise ToolError::Failure(
-            message="tool result payload is not an object",
-          )
-      }
-    _ => raise ToolError::Failure(message="tool response root is not an object")
-  }
-}
-
-///|
-fn parse_tool_definitions(
-  raw : String,
-) -> Array[@model.ToolDef] raise ToolError {
-  let lines = raw
-    .split("\n")
-    .filter(line => line != "" && line.has_prefix("{"))
-    .map(line => line.to_owned())
-    .to_array()
-  if lines.is_empty() {
-    raise ToolError::Failure(message="empty tools/list response")
-  }
-  let payload = @json.parse(lines[lines.length() - 1]) catch {
-    _ => raise ToolError::Failure(message="invalid tools/list response JSON")
-  }
-  match payload {
-    Object(root) =>
-      match get_field(root, "result") {
-        Object(result) =>
-          match get_field(result, "tools") {
-            Array(items) => {
-              let defs : Array[@model.ToolDef] = []
-              for item in items {
-                match item {
-                  Object(tool_obj) => {
-                    let name = match get_string(tool_obj, "name") {
-                      Some(value) => value
-                      None => continue
-                    }
-                    let description = get_string(tool_obj, "description").unwrap_or(
-                      "",
-                    )
-                    let input_schema = tool_obj
-                      .get("inputSchema")
-                      .unwrap_or(Json::object(Map::default()))
-                    defs.push(
-                      @model.ToolDef::make(name, description, input_schema),
-                    )
-                  }
-                  _ => ()
-                }
-              }
-              defs
-            }
-            _ =>
-              raise ToolError::Failure(
-                message="tools/list result missing tools array",
-              )
-          }
-        _ =>
-          raise ToolError::Failure(
-            message="tools/list result payload is not an object",
-          )
-      }
+fn run_mcp_requests(
+  cfg : @config.ToolsConfig,
+  workdir : String,
+  requests : Array[String],
+) -> Result[Json, ToolError] {
+  let stdin_data = requests.join("\n") + "\n"
+  let output = @native.run_command(
+    command_string(cfg, workdir),
+    stdin_data=stdin_data,
+  ) catch {
     _ =>
-      raise ToolError::Failure(
-        message="tools/list response root is not an object",
+      return Err(
+        ToolError::Failure(
+          message="failed to execute better-edit-tools",
+        ),
       )
   }
+  let lines = response_lines(output)
+  if lines.is_empty() {
+    return Err(ToolError::Failure(message="empty MCP response"))
+  }
+  jsonrpc_result_or_error(lines[lines.length() - 1])
+}
+
+///|
+fn mcp_initialize_request() -> String {
+  @mcp_client.build_initialize_request(
+    1,
+    "moonbit-agent",
+    "0.1.0",
+    capabilities={
+      roots: None,
+      sampling: None,
+      elicitation: None,
+    },
+  )
 }
 
 ///|
 pub fn fetch_tool_definitions(
   cfg : @config.ToolsConfig,
   workdir : String,
-) -> Array[@model.ToolDef] raise ToolError {
-  let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"moonbit-agent\",\"version\":\"0.1.0\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
-  parse_tool_definitions(run_mcp(cfg, workdir, request))
+) -> Result[Array[@model.ToolDef], ToolError] {
+  let result_json = run_mcp_requests(cfg, workdir, [
+    mcp_initialize_request(),
+    @mcp_client.build_tools_list_request(2),
+  ])
+  match result_json {
+    Ok(value) => parse_tool_definitions_result(value)
+    Err(Failure(message~)) =>
+      Err(ToolError::Failure(message="tools/list failed: \{message}"))
+  }
 }
 
 ///|
@@ -203,7 +249,14 @@ pub fn call_tool(
   workdir : String,
   name : String,
   arguments_json : String,
-) -> @model.ToolResult raise ToolError {
-  let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"moonbit-agent\",\"version\":\"0.1.0\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\{Json::string(name).stringify()},\"arguments\":\{arguments_json}}}\n"
-  parse_tool_result(run_mcp(cfg, workdir, request))
+) -> Result[@model.ToolResult, ToolError] {
+  let result_json = run_mcp_requests(cfg, workdir, [
+    mcp_initialize_request(),
+    @mcp_client.build_tools_call_request(2, name, arguments=arguments_json),
+  ])
+  match result_json {
+    Ok(value) => parse_tool_call_result(value)
+    Err(Failure(message~)) =>
+      Err(ToolError::Failure(message="tools/call failed: \{message}"))
+  }
 }

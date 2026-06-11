@@ -2,6 +2,11 @@ name = "conglinyizhi/coding_agent_other"
 
 version = "0.1.0"
 
+import {
+  "colmugx/mcp@0.13.4",
+  "moonbitlang/async@0.19.1",
+}
+
 preferred_target = "native"
 
 supported_targets = "native"

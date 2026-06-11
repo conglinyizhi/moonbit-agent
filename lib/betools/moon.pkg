@@ -1,5 +1,12 @@
 import {
+  "colmugx/mcp" @mcp,
+  "colmugx/mcp/protocol/types" @mcp_types,
+  "conglinyizhi/coding_agent_other/lib/config",
   "conglinyizhi/coding_agent_other/lib/native",
+  "conglinyizhi/coding_agent_other/lib/tools",
+  "moonbitlang/async",
+  "moonbitlang/async/io" @io,
+  "moonbitlang/async/stdio" @stdio,
   "moonbitlang/core/debug",
   "moonbitlang/core/env",
   "moonbitlang/core/json",

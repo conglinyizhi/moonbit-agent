@@ -1,5 +1,6 @@
 import {
   "conglinyizhi/coding_agent_other/lib/betools",
+  "moonbitlang/async",
 }
 
 options(

@@ -9,27 +9,37 @@ fn cleanup_trx_state() -> Unit {
 }
 
 ///|
-fn parse_mcp_call(raw : String) -> Json {
-  let lines = raw
-    .split("\n")
-    .filter(line => line != "" && line.has_prefix("{"))
-    .map(line => line.to_owned())
-    .to_array()
-  @json.parse(lines[lines.length() - 1]) catch {
-    _ => json_text_result("failed to parse mcp output", true)
+async fn run_mcp_tool(name : String, arguments_json : String) -> Json {
+  let cfg = @config.default_config()
+  match @tools.call_tool(cfg.tools, cfg.agent.workdir, name, arguments_json) {
+    Ok(result) => {
+      let parsed_content = @json.parse(result.content_text) catch {
+        _ => Json::null()
+      }
+      if parsed_content is Object(payload) {
+        let merged : Map[String, Json] = payload.copy()
+        if result.is_error {
+          merged.set("isError", bool_json(true))
+        }
+        Json::object(merged)
+      } else {
+      let fields : Array[(String, Json)] = [
+        (
+          "content",
+          arr([obj([("type", str("text")), ("text", str(result.content_text))])]),
+        ),
+      ]
+      if result.is_error {
+        fields.push(("isError", bool_json(true)))
+      }
+      obj(fields)
+      }
+    }
+    Err(err) =>
+      match err {
+        Failure(message~) => json_text_result(message, true)
+      }
   }
-}
-
-///|
-fn run_mcp_tool(name : String, arguments_json : String) -> Json {
-  let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"wbtest\",\"version\":\"0.1.0\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"\{name}\",\"arguments\":\{arguments_json}}}\n"
-  let output = @native.run_command(
-    "./_build/native/debug/build/cmd/better-edit-tools/better-edit-tools.exe",
-    stdin_data=request,
-  ) catch {
-    _ => return json_text_result("failed to run mcp tool", true)
-  }
-  parse_mcp_call(output)
 }
 
 ///|
@@ -117,7 +127,7 @@ test "tool_read reports directory path instead of crashing native reader" {
 }
 
 ///|
-test "tool_read through mcp bridge rejects invalid directory request without crashing" {
+async test "tool_read through mcp bridge rejects invalid directory request without crashing" {
   let result = run_mcp_tool(
     "be-read",
     "{\"file\":\".\",\"start\":0}",
@@ -155,7 +165,7 @@ test "tool_trx_rollback restores prior file states" {
 }
 
 ///|
-test "tool_trx_rollback through mcp bridge returns real snapshot result" {
+async test "tool_trx_rollback through mcp bridge returns real snapshot result" {
   cleanup_trx_state()
   let path = unique_tmp_file("betools-trx-mcp")
   @native.write_file(path, "a\nb\n")
