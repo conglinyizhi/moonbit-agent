@@ -16,6 +16,56 @@ fn sample_tools() -> Array[@model.ToolDef] {
 }
 
 ///|
+fn scripted_model_driver(
+  replies : Array[@model.ModelReply],
+) -> (Array[@model.Message], Array[@model.ToolDef]) -> @model.ModelReply raise AgentError {
+  let mut reply_index = 0
+  (_messages, _tools) => {
+    if reply_index >= replies.length() {
+      raise AgentError::Failure(message="scripted model reply exhausted")
+    }
+    let reply = replies[reply_index]
+    reply_index += 1
+    reply
+  }
+}
+
+///|
+fn scripted_tool_driver(
+  results : Array[@model.ToolResult],
+) -> (@model.ToolCall) -> @model.ToolResult raise AgentError {
+  let mut result_index = 0
+  (_call) => {
+    if result_index >= results.length() {
+      raise AgentError::Failure(message="scripted tool result exhausted")
+    }
+    let result = results[result_index]
+    result_index += 1
+    result
+  }
+}
+
+///|
+fn run_scripted_turn(
+  cfg : @config.AppConfig,
+  tools : Array[@model.ToolDef],
+  history : Array[@model.Message],
+  user_input : String,
+  replies : Array[@model.ModelReply],
+  results : Array[@model.ToolResult],
+) -> Array[@model.Message] raise AgentError {
+  run_turn_with_driver(
+    cfg,
+    tools,
+    history,
+    user_input,
+    scripted_model_driver(replies),
+    scripted_tool_driver(results),
+    false,
+  )
+}
+
+///|
 test "handle_local_command clears history but preserves system prompt" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
@@ -436,4 +486,182 @@ test "build_request_body renders messages and tools without root stringify" {
   @debug.assert_eq(body.contains("\"start\""), true)
   @debug.assert_eq(body.contains("\"integer\""), true)
   @debug.assert_eq(body.contains("\"required\""), true)
+}
+
+///|
+test "parse_model_response reads assistant content and tool calls" {
+  let raw = "{\"choices\":[{\"message\":{\"content\":\"\",\"tool_calls\":[{\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"be-read\",\"arguments\":\"{\\\"file\\\":\\\"/tmp/x\\\",\\\"start\\\":1}\"}}]}}]}"
+  let reply = parse_model_response(raw)
+  @debug.assert_eq(reply.content, "")
+  @debug.assert_eq(reply.tool_calls.length(), 1)
+  @debug.assert_eq(reply.tool_calls[0].id, "call-1")
+  @debug.assert_eq(reply.tool_calls[0].name, "be-read")
+  @debug.assert_eq(
+    reply.tool_calls[0].arguments_json.contains("\"file\":\"/tmp/x\""),
+    true,
+  )
+}
+
+///|
+test "run_turn_with_driver completes scripted multi turn tool flow" {
+  let cfg = sample_cfg()
+  let history : Array[@model.Message] = [
+    @model.system_message(cfg.agent.system_prompt),
+  ]
+  let next_history = run_scripted_turn(
+    cfg,
+    sample_tools(),
+    history,
+    "read file",
+    [
+      @model.ModelReply::make(
+        "",
+        [
+          @model.ToolCall::make(
+            "call-1",
+            "be-read",
+            "{\"file\":\"/tmp/x\",\"start\":1}",
+          ),
+        ],
+      ),
+      @model.ModelReply::make("final answer", []),
+    ],
+    [@model.ToolResult::make("call-1", "1: alpha", false)],
+  ) catch {
+    _ => []
+  }
+  @debug.assert_eq(next_history.length(), 4)
+  match next_history[1] {
+    User(content) => @debug.assert_eq(content, "read file")
+    _ => @debug.assert_eq("user", "unexpected")
+  }
+  match next_history[2] {
+    Tool(call_id~, name~, content~, is_error~) => {
+      @debug.assert_eq(call_id, "call-1")
+      @debug.assert_eq(name, "be-read")
+      @debug.assert_eq(content, "1: alpha")
+      @debug.assert_eq(is_error, false)
+    }
+    _ => @debug.assert_eq("tool", "unexpected")
+  }
+  match next_history[3] {
+    Assistant(content) => @debug.assert_eq(content, "final answer")
+    _ => @debug.assert_eq("assistant", "unexpected")
+  }
+}
+
+///|
+test "run_turn_with_driver reports scripted model exhaustion" {
+  let cfg = sample_cfg()
+  let history : Array[@model.Message] = [
+    @model.system_message(cfg.agent.system_prompt),
+  ]
+  let result = run_turn_with_driver(
+    cfg,
+    sample_tools(),
+    history,
+    "read file",
+    (_messages, _tools) => {
+      raise AgentError::Failure(message="scripted model reply exhausted")
+    },
+    (_call) => @model.ToolResult::make("call-1", "ok", false),
+    false,
+  ) catch {
+    err => {
+      @debug.assert_eq(render_agent_error(err), "scripted model reply exhausted")
+      return
+    }
+  }
+  ignore(result)
+  @debug.assert_eq("error", "expected")
+}
+
+///|
+test "run_turn_with_driver enforces tool call limit with scripted replies" {
+  let cfg = sample_cfg()
+  let history : Array[@model.Message] = [
+    @model.system_message(cfg.agent.system_prompt),
+  ]
+  let tool_calls : Array[@model.ToolCall] = []
+  let tool_results : Array[@model.ToolResult] = []
+  for i in 0..<(cfg.agent.max_tool_calls_per_turn + 1) {
+    tool_calls.push(@model.ToolCall::make("call-\{i}", "be-read", "{}"))
+    tool_results.push(@model.ToolResult::make("call-\{i}", "ok", false))
+  }
+  let result = run_scripted_turn(
+    cfg,
+    sample_tools(),
+    history,
+    "read file",
+    [@model.ModelReply::make("", tool_calls)],
+    tool_results,
+  ) catch {
+    err => {
+      @debug.assert_eq(render_agent_error(err), "tool call limit exceeded")
+      return
+    }
+  }
+  ignore(result)
+  @debug.assert_eq("error", "expected")
+}
+
+///|
+test "run_scripted_turn preserves assistant content before tool call continuation" {
+  let cfg = sample_cfg()
+  let history : Array[@model.Message] = [
+    @model.system_message(cfg.agent.system_prompt),
+  ]
+  let next_history = run_scripted_turn(
+    cfg,
+    sample_tools(),
+    history,
+    "inspect file",
+    [
+      @model.ModelReply::make(
+        "Let me inspect that.",
+        [@model.ToolCall::make("call-1", "be-read", "{\"file\":\"/tmp/x\"}")],
+      ),
+      @model.ModelReply::make("done", []),
+    ],
+    [@model.ToolResult::make("call-1", "1: alpha", false)],
+  ) catch {
+    _ => []
+  }
+  @debug.assert_eq(next_history.length(), 5)
+  match next_history[2] {
+    Assistant(content) => @debug.assert_eq(content, "Let me inspect that.")
+    _ => @debug.assert_eq("assistant", "unexpected")
+  }
+  match next_history[4] {
+    Assistant(content) => @debug.assert_eq(content, "done")
+    _ => @debug.assert_eq("assistant", "unexpected")
+  }
+}
+
+///|
+test "run_scripted_turn reports scripted tool exhaustion" {
+  let cfg = sample_cfg()
+  let history : Array[@model.Message] = [
+    @model.system_message(cfg.agent.system_prompt),
+  ]
+  let result = run_scripted_turn(
+    cfg,
+    sample_tools(),
+    history,
+    "read file",
+    [
+      @model.ModelReply::make(
+        "",
+        [@model.ToolCall::make("call-1", "be-read", "{}")],
+      ),
+    ],
+    [],
+  ) catch {
+    err => {
+      @debug.assert_eq(render_agent_error(err), "scripted tool result exhausted")
+      return
+    }
+  }
+  ignore(result)
+  @debug.assert_eq("error", "expected")
 }

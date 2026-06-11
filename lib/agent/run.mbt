@@ -606,19 +606,7 @@ fn api_error_message(root : Map[String, Json]) -> String? {
 }
 
 ///|
-fn send_model_request(
-  cfg : @config.AppConfig,
-  messages : Array[@model.Message],
-  tools : Array[@model.ToolDef],
-) -> @model.ModelReply raise AgentError {
-  let body = build_request_body(cfg, messages, tools)
-  let raw = @http.post_json(
-    cfg.model.base_url + "/chat/completions",
-    cfg.model.api_key,
-    body,
-  ) catch {
-    _ => raise AgentError::Failure(message="model request failed")
-  }
+fn parse_model_response(raw : String) -> @model.ModelReply raise AgentError {
   let json = @json.parse(raw) catch {
     err =>
       raise AgentError::Failure(
@@ -655,20 +643,42 @@ fn send_model_request(
 }
 
 ///|
-fn run_turn(
+fn send_model_request(
+  cfg : @config.AppConfig,
+  messages : Array[@model.Message],
+  tools : Array[@model.ToolDef],
+) -> @model.ModelReply raise AgentError {
+  let body = build_request_body(cfg, messages, tools)
+  let raw = @http.post_json(
+    cfg.model.base_url + "/chat/completions",
+    cfg.model.api_key,
+    body,
+  ) catch {
+    _ => raise AgentError::Failure(message="model request failed")
+  }
+  parse_model_response(raw)
+}
+
+///|
+fn run_turn_with_driver(
   cfg : @config.AppConfig,
   tools : Array[@model.ToolDef],
   history : Array[@model.Message],
   user_input : String,
+  next_model_reply : (Array[@model.Message], Array[@model.ToolDef]) -> @model.ModelReply raise AgentError,
+  next_tool_result : (@model.ToolCall) -> @model.ToolResult raise AgentError,
+  show_output : Bool,
 ) -> Array[@model.Message] raise AgentError {
   let messages = history.copy()
   messages.push(@model.user_message(user_input))
   let mut turn = 0
   let mut tool_calls = 0
   while turn < cfg.agent.max_turns {
-    let reply = send_model_request(cfg, messages, tools)
-    if reply.content != "" {
+    let reply = next_model_reply(messages, tools)
+    if show_output && reply.content != "" {
       print_ui(cfg, reply.content)
+    }
+    if reply.content != "" {
       messages.push(@model.assistant_message(reply.content))
     }
     if reply.tool_calls.is_empty() {
@@ -682,18 +692,8 @@ fn run_turn(
       if cfg.ui.show_tool_calls {
         print_ui(cfg, "[tool] \{call.name} \{call.arguments_json}")
       }
-      let result = @tools.call_tool(
-        cfg.tools,
-        cfg.agent.workdir,
-        call.name,
-        call.arguments_json,
-      ) catch {
-        err =>
-          raise AgentError::Failure(
-            message="tool call failed: \{render_tool_error(err)}",
-          )
-      }
-      if cfg.ui.show_raw_tool_results {
+      let result = next_tool_result(call)
+      if show_output && cfg.ui.show_raw_tool_results {
         print_ui(cfg, result.content_text)
       }
       messages.push(
@@ -708,6 +708,36 @@ fn run_turn(
     turn += 1
   }
   messages
+}
+
+///|
+fn run_turn(
+  cfg : @config.AppConfig,
+  tools : Array[@model.ToolDef],
+  history : Array[@model.Message],
+  user_input : String,
+) -> Array[@model.Message] raise AgentError {
+  run_turn_with_driver(
+    cfg,
+    tools,
+    history,
+    user_input,
+    (messages, tools) => send_model_request(cfg, messages, tools),
+    (call) => {
+      @tools.call_tool(
+        cfg.tools,
+        cfg.agent.workdir,
+        call.name,
+        call.arguments_json,
+      ) catch {
+        err =>
+          raise AgentError::Failure(
+            message="tool call failed: \{render_tool_error(err)}",
+          )
+      }
+    },
+    true,
+  )
 }
 
 ///|
