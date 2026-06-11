@@ -46,45 +46,67 @@ fn scripted_tool_driver(
 }
 
 ///|
-fn run_scripted_turn(
+async fn run_scripted_turn(
   cfg : @config.AppConfig,
   tools : Array[@model.ToolDef],
   history : Array[@model.Message],
   user_input : String,
   replies : Array[@model.ModelReply],
   results : Array[@model.ToolResult],
-) -> Array[@model.Message] raise AgentError {
+) -> Result[Array[@model.Message], AgentError] {
   run_turn_with_driver(
     cfg,
     tools,
     history,
     user_input,
     scripted_model_driver(replies),
-    scripted_tool_driver(results),
+    (call) => {
+      let result = scripted_tool_driver(results)(call) catch {
+        err => return Err(err)
+      }
+      Ok(result)
+    },
     false,
   )
 }
 
 ///|
-test "handle_local_command clears history but preserves system prompt" {
+async fn run_local_command_for_test(
+  input : String,
+  cfg : @config.AppConfig,
+  tools : Array[@model.ToolDef],
+  history : Array[@model.Message],
+) -> Result[Array[@model.Message]?, AgentError] {
+  handle_local_command(input, cfg, tools, history)
+}
+
+
+///|
+async test "handle_local_command clears history but preserves system prompt" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
     @model.user_message("hello"),
     @model.assistant_message("world"),
   ]
-  let next_history = handle_local_command(
+  let next_history = match run_local_command_for_test(
     "/clear",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    _ => None
+  ) {
+    Ok(Some(value)) => value
+    Ok(None) => {
+      @debug.assert_eq("some", "none")
+      return
+    }
+    Err(err) => {
+      @debug.assert_eq(render_agent_error(err), "__unexpected_error__")
+      return
+    }
   }
-  @debug.assert_eq(next_history is Some(_), true)
-  let cleared = next_history.unwrap()
-  @debug.assert_eq(cleared.length(), 1)
-  match cleared[0] {
+  @debug.assert_eq(next_history.length(), 1)
+  match next_history[0] {
     System(content) => @debug.assert_eq(content, cfg.agent.system_prompt)
     _ => @debug.assert_eq("system", "unexpected")
   }
@@ -179,22 +201,25 @@ test "parse_local_tool_call rejects missing payload" {
 }
 
 ///|
-test "handle_local_command returns unchanged history for tools listing" {
+async test "handle_local_command returns unchanged history for tools listing" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
     @model.user_message("hello"),
   ]
-  let next_history = handle_local_command(
+  let next_history = match run_local_command_for_test(
     "/tools",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    _ => None
+  ) {
+    Ok(Some(value)) => value
+    _ => {
+      @debug.assert_eq("ok some", "unexpected")
+      return
+    }
   }
-  @debug.assert_eq(next_history is Some(_), true)
-  @debug.assert_eq(next_history.unwrap().length(), history.length())
+  @debug.assert_eq(next_history.length(), history.length())
 }
 
 ///|
@@ -204,64 +229,76 @@ test "find_tool_definition finds discovered tool by name" {
 }
 
 ///|
-test "handle_local_command saves config to requested path" {
+async test "handle_local_command saves config to requested path" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
   ]
   let path = "/tmp/moon_agent_saved_from_command.toml"
-  let next_history = handle_local_command(
+  let next_history = match run_local_command_for_test(
     "/saveconfig /tmp/moon_agent_saved_from_command.toml",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    _ => None
+  ) {
+    Ok(Some(value)) => value
+    _ => {
+      @debug.assert_eq("ok some", "unexpected")
+      return
+    }
   }
-  @debug.assert_eq(next_history is Some(_), true)
+  @debug.assert_eq(next_history.length(), history.length())
   let loaded = @config.load_config(path) catch { _ => @config.default_config() }
   @debug.assert_eq(loaded.agent.system_prompt, cfg.agent.system_prompt)
 }
 
 ///|
-test "handle_local_command saves history to requested path" {
+async test "handle_local_command saves history to requested path" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
     @model.user_message("hello"),
   ]
   let path = "/tmp/moon_agent_saved_history.txt"
-  let next_history = handle_local_command(
+  let next_history = match run_local_command_for_test(
     "/savehistory /tmp/moon_agent_saved_history.txt",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    _ => None
+  ) {
+    Ok(Some(value)) => value
+    _ => {
+      @debug.assert_eq("ok some", "unexpected")
+      return
+    }
   }
-  @debug.assert_eq(next_history is Some(_), true)
+  @debug.assert_eq(next_history.length(), history.length())
   let saved = @native.read_file(path) catch { _ => "" }
   @debug.assert_eq(saved.contains("1. system:"), true)
   @debug.assert_eq(saved.contains("2. user: hello"), true)
 }
 
 ///|
-test "handle_local_command saves history json to requested path" {
+async test "handle_local_command saves history json to requested path" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
     @model.user_message("hello"),
   ]
   let path = "/tmp/moon_agent_saved_history.jsonl"
-  let next_history = handle_local_command(
+  let next_history = match run_local_command_for_test(
     "/savehistoryjson /tmp/moon_agent_saved_history.jsonl",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    _ => None
+  ) {
+    Ok(Some(value)) => value
+    _ => {
+      @debug.assert_eq("ok some", "unexpected")
+      return
+    }
   }
-  @debug.assert_eq(next_history is Some(_), true)
+  @debug.assert_eq(next_history.length(), history.length())
   let saved = @native.read_file(path) catch { _ => "" }
   @debug.assert_eq(saved.contains("\"role\":\"system\""), true)
   @debug.assert_eq(saved.contains("\"role\":\"user\""), true)
@@ -287,7 +324,7 @@ test "parse_history_message_line parses tool messages" {
 }
 
 ///|
-test "handle_local_command loads history json from requested path" {
+async test "handle_local_command loads history json from requested path" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
@@ -298,16 +335,22 @@ test "handle_local_command loads history json from requested path" {
   ) catch {
     _ => ()
   }
-  let next_history = handle_local_command(
+  let loaded = match run_local_command_for_test(
     "/loadhistoryjson /tmp/moon_agent_loaded_history.jsonl",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    _ => None
+  ) {
+    Ok(Some(value)) => value
+    Ok(None) => {
+      @debug.assert_eq("some", "none")
+      return
+    }
+    Err(err) => {
+      @debug.assert_eq(render_agent_error(err), "__unexpected_error__")
+      return
+    }
   }
-  @debug.assert_eq(next_history is Some(_), true)
-  let loaded = next_history.unwrap()
   @debug.assert_eq(loaded.length(), 3)
   match loaded[0] {
     System(content) => @debug.assert_eq(content, "sys")
@@ -335,65 +378,77 @@ test "timestamp_prefix follows ui configuration" {
 }
 
 ///|
-test "handle_local_command returns unchanged history for history command" {
+async test "handle_local_command returns unchanged history for history command" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
     @model.user_message("hello"),
   ]
-  let next_history = handle_local_command(
+  let next_history = match run_local_command_for_test(
     "/history",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    _ => None
+  ) {
+    Ok(Some(value)) => value
+    Ok(None) => {
+      @debug.assert_eq("some", "none")
+      return
+    }
+    Err(err) => {
+      @debug.assert_eq(render_agent_error(err), "__unexpected_error__")
+      return
+    }
   }
-  @debug.assert_eq(next_history is Some(_), true)
-  @debug.assert_eq(next_history.unwrap().length(), history.length())
+  @debug.assert_eq(next_history.length(), history.length())
 }
 
 ///|
-test "handle_local_command returns unchanged history for prompt command" {
+async test "handle_local_command returns unchanged history for prompt command" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
     @model.user_message("hello"),
   ]
-  let next_history = handle_local_command(
+  let next_history = match run_local_command_for_test(
     "/prompt",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    _ => None
+  ) {
+    Ok(Some(value)) => value
+    Ok(None) => {
+      @debug.assert_eq("some", "none")
+      return
+    }
+    Err(err) => {
+      @debug.assert_eq(render_agent_error(err), "__unexpected_error__")
+      return
+    }
   }
-  @debug.assert_eq(next_history is Some(_), true)
-  @debug.assert_eq(next_history.unwrap().length(), history.length())
+  @debug.assert_eq(next_history.length(), history.length())
 }
 
 ///|
-test "handle_local_command rejects invalid local tool json" {
+async test "handle_local_command rejects invalid local tool json" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
   ]
-  let result = handle_local_command(
+  let result = run_local_command_for_test(
     "/call be-read not-json",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    err => {
+  )
+  match result {
+    Err(err) =>
       @debug.assert_eq(
         render_agent_error(err),
         "local tool call requires valid JSON arguments",
       )
-      return
-    }
+    Ok(_) => @debug.assert_eq("error", "expected")
   }
-  ignore(result)
-  @debug.assert_eq("error", "expected")
 }
 
 ///|
@@ -422,24 +477,21 @@ test "render_history_jsonl emits one json object per line" {
 }
 
 ///|
-test "handle_local_command rejects unknown tool help target" {
+async test "handle_local_command rejects unknown tool help target" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
   ]
-  let result = handle_local_command(
+  let result = run_local_command_for_test(
     "/toolhelp nope",
     cfg,
     sample_tools(),
     history,
-  ) catch {
-    err => {
-      @debug.assert_eq(render_agent_error(err), "unknown tool: nope")
-      return
-    }
+  )
+  match result {
+    Err(err) => @debug.assert_eq(render_agent_error(err), "unknown tool: nope")
+    Ok(_) => @debug.assert_eq("error", "expected")
   }
-  ignore(result)
-  @debug.assert_eq("error", "expected")
 }
 
 ///|
@@ -503,12 +555,12 @@ test "parse_model_response reads assistant content and tool calls" {
 }
 
 ///|
-test "run_turn_with_driver completes scripted multi turn tool flow" {
+async test "run_turn_with_driver completes scripted multi turn tool flow" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
   ]
-  let next_history = run_scripted_turn(
+  let next_history = match run_scripted_turn(
     cfg,
     sample_tools(),
     history,
@@ -527,8 +579,12 @@ test "run_turn_with_driver completes scripted multi turn tool flow" {
       @model.ModelReply::make("final answer", []),
     ],
     [@model.ToolResult::make("call-1", "1: alpha", false)],
-  ) catch {
-    _ => []
+  ) {
+    Ok(value) => value
+    Err(err) => {
+      @debug.assert_eq(render_agent_error(err), "__unexpected_error__")
+      return
+    }
   }
   @debug.assert_eq(next_history.length(), 4)
   match next_history[1] {
@@ -551,7 +607,7 @@ test "run_turn_with_driver completes scripted multi turn tool flow" {
 }
 
 ///|
-test "run_turn_with_driver reports scripted model exhaustion" {
+async test "run_turn_with_driver reports scripted model exhaustion" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
@@ -564,20 +620,18 @@ test "run_turn_with_driver reports scripted model exhaustion" {
     (_messages, _tools) => {
       raise AgentError::Failure(message="scripted model reply exhausted")
     },
-    (_call) => @model.ToolResult::make("call-1", "ok", false),
+    (_call) => Ok(@model.ToolResult::make("call-1", "ok", false)),
     false,
-  ) catch {
-    err => {
+  )
+  match result {
+    Err(err) =>
       @debug.assert_eq(render_agent_error(err), "scripted model reply exhausted")
-      return
-    }
+    Ok(_) => @debug.assert_eq("error", "expected")
   }
-  ignore(result)
-  @debug.assert_eq("error", "expected")
 }
 
 ///|
-test "run_turn_with_driver enforces tool call limit with scripted replies" {
+async test "run_turn_with_driver enforces tool call limit with scripted replies" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
@@ -595,23 +649,20 @@ test "run_turn_with_driver enforces tool call limit with scripted replies" {
     "read file",
     [@model.ModelReply::make("", tool_calls)],
     tool_results,
-  ) catch {
-    err => {
-      @debug.assert_eq(render_agent_error(err), "tool call limit exceeded")
-      return
-    }
+  )
+  match result {
+    Err(err) => @debug.assert_eq(render_agent_error(err), "tool call limit exceeded")
+    Ok(_) => @debug.assert_eq("error", "expected")
   }
-  ignore(result)
-  @debug.assert_eq("error", "expected")
 }
 
 ///|
-test "run_scripted_turn preserves assistant content before tool call continuation" {
+async test "run_scripted_turn preserves assistant content before tool call continuation" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
   ]
-  let next_history = run_scripted_turn(
+  let next_history = match run_scripted_turn(
     cfg,
     sample_tools(),
     history,
@@ -624,8 +675,12 @@ test "run_scripted_turn preserves assistant content before tool call continuatio
       @model.ModelReply::make("done", []),
     ],
     [@model.ToolResult::make("call-1", "1: alpha", false)],
-  ) catch {
-    _ => []
+  ) {
+    Ok(value) => value
+    Err(err) => {
+      @debug.assert_eq(render_agent_error(err), "__unexpected_error__")
+      return
+    }
   }
   @debug.assert_eq(next_history.length(), 5)
   match next_history[2] {
@@ -639,7 +694,7 @@ test "run_scripted_turn preserves assistant content before tool call continuatio
 }
 
 ///|
-test "run_scripted_turn reports scripted tool exhaustion" {
+async test "run_scripted_turn reports scripted tool exhaustion" {
   let cfg = sample_cfg()
   let history : Array[@model.Message] = [
     @model.system_message(cfg.agent.system_prompt),
@@ -656,12 +711,10 @@ test "run_scripted_turn reports scripted tool exhaustion" {
       ),
     ],
     [],
-  ) catch {
-    err => {
+  )
+  match result {
+    Err(err) =>
       @debug.assert_eq(render_agent_error(err), "scripted tool result exhausted")
-      return
-    }
+    Ok(_) => @debug.assert_eq("error", "expected")
   }
-  ignore(result)
-  @debug.assert_eq("error", "expected")
 }

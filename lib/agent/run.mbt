@@ -427,24 +427,24 @@ fn load_history_json_file(
 }
 
 ///|
-fn handle_local_command(
+async fn handle_local_command(
   input : String,
   cfg : @config.AppConfig,
   tools : Array[@model.ToolDef],
   history : Array[@model.Message],
-) -> Array[@model.Message]? raise AgentError {
+) -> Result[Array[@model.Message]?, AgentError] {
   match input {
     "/help" => {
       print_local_help()
-      Some(history)
+      Ok(Some(history))
     }
     "/prompt" => {
       print_ui(cfg, cfg.agent.system_prompt)
-      Some(history)
+      Ok(Some(history))
     }
     "/tools" => {
       print_ui(cfg, "tools: \{render_tool_names(tools)}")
-      Some(history)
+      Ok(Some(history))
     }
     _ if parse_history_request(input) is Some(mode) => {
       if mode == "full" {
@@ -452,51 +452,51 @@ fn handle_local_command(
       } else {
         print_ui(cfg, "history messages: \{history.length()}")
       }
-      Some(history)
+      Ok(Some(history))
     }
     _ if parse_tool_schema_request(input) is Some(name) => {
       match find_tool_definition(tools, name) {
         Some(tool) => print_ui(cfg, tool.input_schema.stringify())
-        None => raise AgentError::Failure(message="unknown tool: \{name}")
+        None => return Err(AgentError::Failure(message="unknown tool: \{name}"))
       }
-      Some(history)
+      Ok(Some(history))
     }
     _ if parse_tool_help_request(input) is Some(name) => {
       match find_tool_definition(tools, name) {
         Some(tool) => print_ui(cfg, "\{tool.name}: \{tool.description}")
-        None => raise AgentError::Failure(message="unknown tool: \{name}")
+        None => return Err(AgentError::Failure(message="unknown tool: \{name}"))
       }
-      Some(history)
+      Ok(Some(history))
     }
     _ if parse_save_config_request(input) is Some(path) => {
       @config.save_config(path, cfg) catch {
         err =>
-          raise AgentError::Failure(
+          return Err(AgentError::Failure(
             message="save config failed: \{render_config_error(err)}",
-          )
+          ))
       }
       print_ui(cfg, "saved config: \{path}")
-      Some(history)
+      Ok(Some(history))
     }
     _ if parse_save_history_request(input) is Some(path) => {
       @native.write_file(path, render_history_dump(history)) catch {
         _ =>
-          raise AgentError::Failure(
+          return Err(AgentError::Failure(
             message="save history failed: failed to write file",
-          )
+          ))
       }
       print_ui(cfg, "saved history: \{path}")
-      Some(history)
+      Ok(Some(history))
     }
     _ if parse_save_history_json_request(input) is Some(path) => {
       @native.write_file(path, render_history_jsonl(history)) catch {
         _ =>
-          raise AgentError::Failure(
+          return Err(AgentError::Failure(
             message="save history json failed: failed to write file",
-          )
+          ))
       }
       print_ui(cfg, "saved history json: \{path}")
-      Some(history)
+      Ok(Some(history))
     }
     _ if parse_load_history_json_request(input) is Some(path) => {
       let loaded = load_history_json_file(path)
@@ -504,33 +504,35 @@ fn handle_local_command(
         cfg,
         "loaded history json: \{path} (\{loaded.length()} messages)",
       )
-      Some(loaded)
+      Ok(Some(loaded))
     }
-    "/clear" => Some([@model.system_message(cfg.agent.system_prompt)])
+    "/clear" => Ok(Some([@model.system_message(cfg.agent.system_prompt)]))
     _ =>
       match parse_local_tool_call(input) {
         Some((name, arguments_json)) => {
           let _ = @json.parse(arguments_json) catch {
             _ =>
-              raise AgentError::Failure(
+              return Err(AgentError::Failure(
                 message="local tool call requires valid JSON arguments",
-              )
+              ))
           }
-          let result = @tools.call_tool(
-            cfg.tools,
-            cfg.agent.workdir,
-            name,
-            arguments_json,
-          ) catch {
-            err =>
-              raise AgentError::Failure(
+          let result = match
+            @tools.call_tool(
+              cfg.tools,
+              cfg.agent.workdir,
+              name,
+              arguments_json,
+            ) {
+            Ok(value) => value
+            Err(err) =>
+              return Err(AgentError::Failure(
                 message="local tool call failed: \{render_tool_error(err)}",
-              )
+              ))
           }
           print_ui(cfg, result.content_text)
-          Some(history)
+          Ok(Some(history))
         }
-        None => None
+        None => Ok(None)
       }
   }
 }
@@ -660,21 +662,23 @@ fn send_model_request(
 }
 
 ///|
-fn run_turn_with_driver(
+async fn run_turn_with_driver(
   cfg : @config.AppConfig,
   tools : Array[@model.ToolDef],
   history : Array[@model.Message],
   user_input : String,
   next_model_reply : (Array[@model.Message], Array[@model.ToolDef]) -> @model.ModelReply raise AgentError,
-  next_tool_result : (@model.ToolCall) -> @model.ToolResult raise AgentError,
+  next_tool_result : async (@model.ToolCall) -> Result[@model.ToolResult, AgentError],
   show_output : Bool,
-) -> Array[@model.Message] raise AgentError {
+) -> Result[Array[@model.Message], AgentError] {
   let messages = history.copy()
   messages.push(@model.user_message(user_input))
   let mut turn = 0
   let mut tool_calls = 0
   while turn < cfg.agent.max_turns {
-    let reply = next_model_reply(messages, tools)
+    let reply = next_model_reply(messages, tools) catch {
+      err => return Err(err)
+    }
     if show_output && reply.content != "" {
       print_ui(cfg, reply.content)
     }
@@ -687,12 +691,15 @@ fn run_turn_with_driver(
     for call in reply.tool_calls {
       tool_calls += 1
       if tool_calls > cfg.agent.max_tool_calls_per_turn {
-        raise AgentError::Failure(message="tool call limit exceeded")
+        return Err(AgentError::Failure(message="tool call limit exceeded"))
       }
       if cfg.ui.show_tool_calls {
         print_ui(cfg, "[tool] \{call.name} \{call.arguments_json}")
       }
-      let result = next_tool_result(call)
+      let result = match next_tool_result(call) {
+        Ok(value) => value
+        Err(err) => return Err(err)
+      }
       if show_output && cfg.ui.show_raw_tool_results {
         print_ui(cfg, result.content_text)
       }
@@ -707,33 +714,35 @@ fn run_turn_with_driver(
     }
     turn += 1
   }
-  messages
+  Ok(messages)
 }
 
 ///|
-fn run_turn(
+async fn run_turn(
   cfg : @config.AppConfig,
   tools : Array[@model.ToolDef],
   history : Array[@model.Message],
   user_input : String,
-) -> Array[@model.Message] raise AgentError {
+) -> Result[Array[@model.Message], AgentError] {
   run_turn_with_driver(
     cfg,
     tools,
     history,
     user_input,
     (messages, tools) => send_model_request(cfg, messages, tools),
-    (call) => {
-      @tools.call_tool(
-        cfg.tools,
-        cfg.agent.workdir,
-        call.name,
-        call.arguments_json,
-      ) catch {
-        err =>
-          raise AgentError::Failure(
+    async fn(call : @model.ToolCall) -> Result[@model.ToolResult, AgentError] {
+      match
+        @tools.call_tool(
+          cfg.tools,
+          cfg.agent.workdir,
+          call.name,
+          call.arguments_json,
+        ) {
+        Ok(value) => Ok(value)
+        Err(err) =>
+          Err(AgentError::Failure(
             message="tool call failed: \{render_tool_error(err)}",
-          )
+          ))
       }
     },
     true,
@@ -741,7 +750,7 @@ fn run_turn(
 }
 
 ///|
-pub fn run_main() -> Unit {
+pub async fn run_main() -> Unit {
   let config_path = parse_args()
   let cfg = @config.load_config(config_path) catch {
     err => {
@@ -749,8 +758,10 @@ pub fn run_main() -> Unit {
       return
     }
   }
-  let tool_defs = @tools.fetch_tool_definitions(cfg.tools, cfg.agent.workdir) catch {
-    err => {
+  let tool_defs = match
+    @tools.fetch_tool_definitions(cfg.tools, cfg.agent.workdir) {
+    Ok(value) => value
+    Err(err) => {
       println("tool init error: \{render_tool_error(err)}")
       return
     }
@@ -772,8 +783,9 @@ pub fn run_main() -> Unit {
         if input == "/exit" {
           break
         }
-        let local_result = handle_local_command(input, cfg, tool_defs, history) catch {
-          err => {
+        let local_result = match handle_local_command(input, cfg, tool_defs, history) {
+          Ok(value) => value
+          Err(err) => {
             print_ui(cfg, "agent error: \{render_agent_error(err)}")
             continue
           }
@@ -785,8 +797,9 @@ pub fn run_main() -> Unit {
           }
           None => ()
         }
-        let next_history = run_turn(cfg, tool_defs, history, input) catch {
-          err => {
+        let next_history = match run_turn(cfg, tool_defs, history, input) {
+          Ok(value) => value
+          Err(err) => {
             print_ui(cfg, "agent error: \{render_agent_error(err)}")
             continue
           }

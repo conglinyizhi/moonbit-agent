@@ -4,6 +4,7 @@ import {
   "conglinyizhi/coding_agent_other/lib/model",
   "conglinyizhi/coding_agent_other/lib/native",
   "conglinyizhi/coding_agent_other/lib/tools",
+  "moonbitlang/async",
   "moonbitlang/core/debug",
   "moonbitlang/core/env",
   "moonbitlang/core/json",
