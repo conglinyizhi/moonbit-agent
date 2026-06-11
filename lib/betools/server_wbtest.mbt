@@ -99,6 +99,24 @@ test "tool_batch preview does not write file" {
 }
 
 ///|
+test "tool_read rejects invalid start before touching file path" {
+  let result = tool_read(
+    Map([("file", str(".")), ("start", num(0))]),
+  )
+  @debug.assert_eq(result.stringify().contains("\"isError\":true"), true)
+  @debug.assert_eq(result.stringify().contains("invalid line number"), true)
+}
+
+///|
+test "tool_read reports directory path instead of crashing native reader" {
+  let result = tool_read(
+    Map([("file", str(".")), ("start", num(1))]),
+  )
+  @debug.assert_eq(result.stringify().contains("\"isError\":true"), true)
+  @debug.assert_eq(result.stringify().contains("failed to read file"), true)
+}
+
+///|
 test "tool_trx_rollback restores prior file states" {
   cleanup_trx_state()
   let path = unique_tmp_file("betools-trx-rollback")

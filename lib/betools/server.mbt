@@ -998,6 +998,9 @@ fn tool_read(arguments : Map[String, Json]) -> Json {
   }
   let file = file_opt.unwrap()
   let start = start_opt.unwrap()
+  if start < 1 {
+    return json_text_result("invalid line number", true)
+  }
   let end = match arguments.get("end") {
     Some(String(s)) if s == "auto" => 0
     Some(Number(value, ..)) => value.to_int()

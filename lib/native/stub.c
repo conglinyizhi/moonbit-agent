@@ -1,5 +1,6 @@
 #include <moonbit.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,15 @@ static char *bytes_to_cstr(moonbit_bytes_t bytes) {
 MOONBIT_FFI_EXPORT
 moonbit_bytes_t native_read_file(moonbit_bytes_t path_bytes) {
   char *path = bytes_to_cstr(path_bytes);
+  struct stat st;
+  if (stat(path, &st) != 0) {
+    free(path);
+    return make_bytes_from_cstr("ERR:failed to stat file");
+  }
+  if (!S_ISREG(st.st_mode)) {
+    free(path);
+    return make_bytes_from_cstr("ERR:path is not a regular file");
+  }
   FILE *fp = fopen(path, "rb");
   free(path);
   if (!fp) {
