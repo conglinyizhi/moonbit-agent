@@ -117,6 +117,16 @@ test "tool_read reports directory path instead of crashing native reader" {
 }
 
 ///|
+test "tool_read through mcp bridge rejects invalid directory request without crashing" {
+  let result = run_mcp_tool(
+    "be-read",
+    "{\"file\":\".\",\"start\":0}",
+  )
+  @debug.assert_eq(result.stringify().contains("\"isError\":true"), true)
+  @debug.assert_eq(result.stringify().contains("invalid line number"), true)
+}
+
+///|
 test "tool_trx_rollback restores prior file states" {
   cleanup_trx_state()
   let path = unique_tmp_file("betools-trx-rollback")
