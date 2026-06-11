@@ -1,0 +1,157 @@
+import {
+  "moonbitlang/core/strconv" @strconv,
+  "moonbitlang/x@0.4.45/fs" @fs,
+  "moonbitlang/x@0.4.45/sys" @sys,
+}
+
+#borrow(cmd)
+extern "c" fn c_system_bytes(cmd : Bytes) -> Int = "system"
+
+fn ascii_bytes(input : String) -> Bytes {
+  let out : Array[Byte] = []
+  for ch in input {
+    out.push(ch.to_int().reinterpret_as_uint().to_byte())
+  }
+  Bytes::from_array(out)
+}
+
+fn shell_quote(input : String) -> String {
+  "'\{input.replace(old="'", new="'\"'\"'")}'"
+}
+
+fn run_checked(command : String) -> Unit {
+  let status_path = "/tmp/moon-agent-e2e/cmd.status"
+  let wrapped =
+    "{ \{command}; printf '%s' $? >\{shell_quote(status_path)}; }"
+  let raw_code = c_system_bytes(ascii_bytes(wrapped))
+  let code_text = @fs.read_file_to_string(status_path, encoding="utf-8") catch {
+    _ => "\{raw_code}"
+  }
+  let code = @strconv.from_str(code_text.trim().to_owned()) catch { _ => raw_code }
+  if code != 0 {
+    println("command failed: \{command}")
+    @sys.exit(code)
+  }
+}
+
+fn getenv_or(key : String, fallback : String) -> String {
+  match @sys.get_env_var(key) {
+    Some(value) => value
+    None => fallback
+  }
+}
+
+fn build_agent_config(
+  repo_root : String,
+  workdir : String,
+  mock_host : String,
+  mock_port : String,
+) -> String {
+  let lines : Array[String] = [
+    "[model]",
+    "base_url = \"http://\{mock_host}:\{mock_port}\"",
+    "model = \"mock-model\"",
+    "api_key = \"test-key\"",
+    "temperature = 0.2",
+    "max_tokens = 2048",
+    "",
+    "[agent]",
+    "system_prompt = \"You are a pragmatic coding agent. Use tools when needed and keep answers concise.\"",
+    "max_turns = 8",
+    "max_tool_calls_per_turn = 6",
+    "workdir = \"\{workdir}\"",
+    "",
+    "[tools]",
+    "better_edit_tools_cmd = \"\{repo_root}/_build/native/debug/build/cmd/better-edit-tools/better-edit-tools.exe\"",
+    "better_edit_tools_args = []",
+    "startup_timeout_ms = 3000",
+    "call_timeout_ms = 20000",
+    "",
+    "[ui]",
+    "show_timestamps = false",
+    "show_tool_calls = true",
+    "show_raw_tool_results = true",
+    "",
+  ]
+  lines.join("\n")
+}
+
+fn build_shell_runner(
+  repo_root : String,
+  workdir : String,
+  mock_host : String,
+  mock_port : String,
+) -> String {
+  let server_log = "\{workdir}/mock-server.log"
+  let agent_log = "\{workdir}/agent.log"
+  let config_path = "\{workdir}/agent.toml"
+  let lines : Array[String] = [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "cleanup() {",
+    "  if [[ -n \"${server_pid:-}\" ]]; then",
+    "    kill \"$server_pid\" >/dev/null 2>&1 || true",
+    "    wait \"$server_pid\" >/dev/null 2>&1 || true",
+    "  fi",
+    "}",
+    "trap cleanup EXIT",
+    "cd \{shell_quote(repo_root)}",
+    "moon build cmd/better-edit-tools --target native",
+    "moon build cmd/agent --target native",
+    "MOON_AGENT_MOCK_HOST=\{shell_quote(mock_host)} MOON_AGENT_MOCK_PORT=\{shell_quote(mock_port)} moon run scripts/mock_chat_completions.mbtx --target native >\{shell_quote(server_log)} 2>&1 &",
+    "server_pid=$!",
+    "sleep 1",
+    "kill -0 \"$server_pid\"",
+    "printf 'read the file\\n/exit\\n' | ./_build/native/debug/build/cmd/agent/agent.exe --config \{shell_quote(config_path)} >\{shell_quote(agent_log)} 2>&1",
+    "rg -q '^\\\\[tool\\\\] be-read ' \{shell_quote(agent_log)}",
+    "rg -q '^FINAL:1: alpha' \{shell_quote(agent_log)}",
+    "cat \{shell_quote(agent_log)}",
+    "",
+  ]
+  lines.join("\n")
+}
+
+fn main {
+  let repo_root = @sys.get_cli_args().get(1).unwrap_or(".")
+  let workdir = "/tmp/moon-agent-e2e"
+  let config_path = "\{workdir}/agent.toml"
+  let sample_path = "\{workdir}/sample.txt"
+  let runner_path = "\{workdir}/run_mock_e2e_runtime.sh"
+  let mock_host = "127.0.0.1"
+  let mock_port = getenv_or("MOON_AGENT_MOCK_PORT", "18081")
+
+  if !@fs.path_exists(workdir) {
+    @fs.create_dir(workdir) catch {
+      _ => {
+        println("failed to create workdir")
+        @sys.exit(1)
+      }
+    }
+  }
+  @fs.write_string_to_file(sample_path, "alpha\nbeta\n") catch {
+    _ => {
+      println("failed to write sample file")
+      @sys.exit(1)
+    }
+  }
+  @fs.write_string_to_file(
+    config_path,
+    build_agent_config(repo_root, workdir, mock_host, mock_port),
+  ) catch {
+    _ => {
+      println("failed to write agent config")
+      @sys.exit(1)
+    }
+  }
+  @fs.write_string_to_file(
+    runner_path,
+    build_shell_runner(repo_root, workdir, mock_host, mock_port),
+  ) catch {
+    _ => {
+      println("failed to write shell runner")
+      @sys.exit(1)
+    }
+  }
+  run_checked("chmod +x \{shell_quote(runner_path)}")
+  run_checked(shell_quote(runner_path))
+}

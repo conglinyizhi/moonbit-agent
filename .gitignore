@@ -1,4 +1,6 @@
 _build/
+scripts/_build/
+scripts/.mooncakes/
 .moonagent/
 .moonagent-chip-*.txt
 .moonagent-chip-index.txt

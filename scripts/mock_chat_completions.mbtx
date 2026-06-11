@@ -1,0 +1,47 @@
+import {
+  "moonbitlang/x@0.4.45/sys" @sys,
+}
+
+#borrow(cmd)
+extern "c" fn c_system_bytes(cmd : Bytes) -> Int = "system"
+
+fn ascii_bytes(input : String) -> Bytes {
+  let out : Array[Byte] = []
+  for ch in input {
+    out.push(ch.to_int().reinterpret_as_uint().to_byte())
+  }
+  Bytes::from_array(out)
+}
+
+fn shell_quote(input : String) -> String {
+  "'\{input.replace(old="'", new="'\"'\"'")}'"
+}
+
+fn getenv_or(key : String, fallback : String) -> String {
+  match @sys.get_env_var(key) {
+    Some(value) => value
+    None => fallback
+  }
+}
+
+fn python_script(host : String, port : String) -> String {
+  let host_quoted = host.replace(old="\\", new="\\\\").replace(old="'", new="\\'")
+  let port_value = port
+  "from http.server import BaseHTTPRequestHandler, HTTPServer\nimport json\n\nSAMPLE_FILE = '/tmp/moon-agent-e2e/sample.txt'\nHOST = '\{host_quoted}'\nPORT = int('\{port_value}')\n\nclass Handler(BaseHTTPRequestHandler):\n    request_count = 0\n\n    def do_POST(self):\n        if self.path != '/chat/completions':\n            self.send_error(404)\n            return\n        length = int(self.headers.get('Content-Length', '0'))\n        body = self.rfile.read(length)\n        payload = json.loads(body)\n        Handler.request_count += 1\n        if Handler.request_count == 1:\n            response = {\n                'choices': [\n                    {\n                        'message': {\n                            'content': '',\n                            'tool_calls': [\n                                {\n                                    'id': 'call-1',\n                                    'type': 'function',\n                                    'function': {\n                                        'name': 'be-read',\n                                        'arguments': json.dumps({\n                                            'file': SAMPLE_FILE,\n                                            'start': 1,\n                                            'end': 2,\n                                        }),\n                                    },\n                                }\n                            ],\n                        }\n                    }\n                ]\n            }\n        else:\n            tool_messages = [item for item in payload.get('messages', []) if item.get('role') == 'tool']\n            tool_content = tool_messages[-1].get('content', '') if tool_messages else ''\n            response = {'choices': [{'message': {'content': f'FINAL:{tool_content}'}}]}\n        raw = json.dumps(response).encode()\n        self.send_response(200)\n        self.send_header('Content-Type', 'application/json')\n        self.send_header('Content-Length', str(len(raw)))\n        self.end_headers()\n        self.wfile.write(raw)\n\n    def log_message(self, format, *args):\n        return\n\nHTTPServer.allow_reuse_address = True\nHTTPServer((HOST, PORT), Handler).serve_forever()\n"
+}
+
+fn main {
+  let host = getenv_or("MOON_AGENT_MOCK_HOST", "127.0.0.1")
+  let port = getenv_or("MOON_AGENT_MOCK_PORT", "18080")
+  let script_path = "/tmp/moon-agent-e2e/mock_chat_completions_runtime.py"
+  let script = python_script(host, port)
+  let write_cmd =
+    "cat >\{shell_quote(script_path)} <<'PYEOF'\n\{script}PYEOF"
+  let write_code = c_system_bytes(ascii_bytes(write_cmd))
+  if write_code != 0 {
+    @sys.exit(write_code)
+  }
+  let cmd = "python \{shell_quote(script_path)}"
+  let code = c_system_bytes(ascii_bytes(cmd))
+  @sys.exit(code)
+}
