@@ -3,7 +3,7 @@
 最简 MoonBit agent loop，包含：
 
 - 通过远程 Chat Completions API 与模型交互
-- 使用 `agent.toml` 保存模型、工具和 UI 配置
+- 使用 TOML 配置文件保存模型、工具和 UI 配置
 - 内置一个可原生编译的 `better-edit-tools` MCP server
 - agent 启动时通过 MCP `tools/list` 动态发现工具 schema
 - 工具调用会在 `agent.workdir` 指定的工作目录下执行
@@ -24,7 +24,13 @@ make build
 
 ## Run Agent
 
-先编辑 `agent.toml` 中的 API 配置，然后运行：
+先复制范例配置并按需填写本地私有参数：
+
+```bash
+cp agent.example.toml agent.toml
+```
+
+然后编辑 `agent.toml` 中的 API 配置，再运行：
 
 ```bash
 moon run cmd/agent --target native
@@ -35,6 +41,14 @@ moon run cmd/agent --target native
 ```bash
 make run
 ```
+
+`make run` 默认使用仓库里的 `agent.example.toml`，如果你已经准备了本地私有配置，可以显式指定：
+
+```bash
+make run CONFIG=agent.toml
+```
+
+当前仓库只提交 `agent.example.toml`，不再跟踪真实 `agent.toml`，避免把本地密钥或私有端点带进版本库。后续更稳妥的方向是把默认用户配置迁移到 `~/.config/...` 下的专用目录，而不是继续放在仓库根目录。
 
 在 `2026-06-11` 这台机器上，`moon 0.1.20260610` 下连续多次执行 `moon run cmd/agent --target native` 和 `moon run cmd/better-edit-tools --target native` 都没有复现此前的 `tcc` 崩溃；但系统里仍保留 `2026-06-10` 的历史 core dump，因此如果你在其他机器或旧版本 toolchain 上仍遇到 native 运行崩溃，推荐的保守方式仍然是先 `moon build` 再直接执行生成的二进制。
 
